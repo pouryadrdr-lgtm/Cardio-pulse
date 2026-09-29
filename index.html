@@ -226,9 +226,31 @@
       <div class="panel">
         <div class="panel-head">
           <h3>Trend</h3>
-          <select id="trend-metric-select"></select>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <select id="trend-granularity-select">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+            <select id="trend-metric-select"></select>
+          </div>
         </div>
         <div class="chart-wrap"><canvas id="trend-chart"></canvas></div>
+      </div>
+    </section>
+
+    <section id="forecast-section">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Forecast</h3>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-dim);font-weight:600">For</span>
+            <select id="forecast-month-select"></select>
+            <select id="forecast-year-select"></select>
+          </div>
+        </div>
+        <div class="tiles" id="forecast-tiles"></div>
       </div>
     </section>
 
@@ -391,9 +413,12 @@
   var customFrom = null, customTo = null; // ISO strings, only used when dateFilter === 'custom'
   var channelTypeFilter = '';
   var trendMetric = 'leads';
+  var trendGranularity = 'daily'; // daily | weekly | monthly | yearly
   var breakdownDim = 'channelType';
   var activeTab = 'overview';
   var charts = { trend: null, breakdown: null, lp: null, cp: null };
+  var FORECAST_METRICS = ['leads','cpl','mql','cpmql']; // the metrics this feature covers
+  var forecastYear = null, forecastMonth = null; // Jalali — the future month being forecast for
 
   var TYPED_METRICS = ['leads','mql','orders','cost'];
   var METRIC_LABELS = { cost:'Cost (IRR)', impressions:'Impressions', clicks:'Clicks', sessions:'Sessions',
@@ -403,7 +428,8 @@
   var els = {};
   ['status-dot','status-text','settings-panel','endpoint-input','empty-state','error-state','error-detail',
    'content','tiles','date-filter-select','custom-range','from-y','from-m','from-d','to-y','to-m','to-d','channel-type-select','range-label',
-   'trend-metric-select','breakdown-dim-select','footer-time',
+   'trend-metric-select','trend-granularity-select','breakdown-dim-select','footer-time',
+   'forecast-tiles','forecast-year-select','forecast-month-select',
    'lp-summary','cp-summary'].forEach(function(id){
     els[id.replace(/-([a-z])/g,function(_,c){return c.toUpperCase();})] = document.getElementById(id);
   });
@@ -429,9 +455,22 @@
   // ---------- Target lookup (Targets tab: one row per Jalali Year+Month) ----------
   function tfield(row, name){ return row[TARGET_IDX[name]] || 0; }
 
+  // Per-Channel-Type targets exist only for Lead and Cost (Settings!E "Target Lead <Channel>" / "Target
+  // Cost <Channel>" columns) — when a specific Channel Type filter is active, prefer that channel's own
+  // target over the blended one; other metrics/channels fall back to the blended target unchanged.
+  var CHANNEL_TARGET_METRICS_ = { leads: 'lead', cost: 'cost' };
+  // "Organic" was merged into "Direct" for Cardio (2026-09-29) — no separate Organic target column,
+  // and it's no longer a selectable Channel Type at all (removed from the Settings dropdown).
+  var CHANNEL_TARGET_SUFFIX_ = { 'Performance':'Performance', 'Blog':'Blog', 'Retention':'Retention', 'eCRM':'Ecrm' };
+
   function monthlyTargetFor(metricKey, jy, jmIdx){
     var row = TARGETS_BY_KEY[jy + '|' + JMONTHS_FULL[jmIdx-1]];
     if (!row) return 0;
+    var chPrefix = CHANNEL_TARGET_METRICS_[metricKey];
+    if (channelTypeFilter && chPrefix){
+      var suffix = CHANNEL_TARGET_SUFFIX_[channelTypeFilter.trim()];
+      if (suffix) return tfield(row, chPrefix + suffix);
+    }
     return tfield(row, metricKey);
   }
 
@@ -597,6 +636,61 @@
     fillSelect(dSel, days, prevDay);
   }
 
+  // Forecast month picker — defaults to the month right after the anchor month (rolling into next
+  // year past Esfand). Range covers the anchor year and the next one, since a Target row has to exist
+  // for the chosen month for a forecast to be computable at all.
+  function populateForecastPicker(){
+    if (!anchorISO) return;
+    var d = dateFromISO(anchorISO);
+    var j = toJalaali(d.getUTCFullYear(), d.getUTCMonth()+1, d.getUTCDate());
+    var years = [[j.jy, j.jy], [j.jy+1, j.jy+1]];
+    var months = JMONTHS_FULL.map(function(name, i){ return [i+1, name]; });
+    var defaultMonth = j.jm + 1, defaultYear = j.jy;
+    if (defaultMonth > 12){ defaultMonth = 1; defaultYear = j.jy + 1; }
+    var already = els.forecastYearSelect.options.length > 0;
+    fillSelect(els.forecastMonthSelect, months, already ? els.forecastMonthSelect.value : defaultMonth);
+    fillSelect(els.forecastYearSelect, years, already ? els.forecastYearSelect.value : defaultYear);
+    if (!forecastYear){ forecastYear = defaultYear; forecastMonth = defaultMonth; }
+  }
+
+  // The forecast formula: historical actual / historical planned (over the CURRENTLY selected date
+  // filter, same basis as the KPI tiles) gives a pace ratio; applying that ratio to the future month's
+  // own planned value projects a forecast for that month. Returns null when either side of the ratio
+  // has no plan entered yet — a forecast without a real denominator would just be a fabricated number.
+  function computeForecast(metricKey){
+    if (!forecastYear || !forecastMonth) return null;
+    var t = computeTotals(filteredRows());
+    var histActual = t[metricKey];
+    var histInfo = periodTargetInfo(metricKey);
+    var histPlanned = histInfo ? histInfo.target : 0;
+    if (!histPlanned) return null;
+    var pace = histActual / histPlanned;
+    var isRatio = metricKey==='cpl'||metricKey==='cpmql';
+    var futurePlanned = isRatio ? monthlyRatioTarget(metricKey, forecastYear, forecastMonth) : monthlyTargetFor(metricKey, forecastYear, forecastMonth);
+    if (!futurePlanned) return null;
+    return { histActual: histActual, histPlanned: histPlanned, pace: pace, futurePlanned: futurePlanned, forecast: futurePlanned * pace };
+  }
+
+  function renderForecastTiles(){
+    if (!els.forecastTiles) return;
+    els.forecastTiles.innerHTML = '';
+    FORECAST_METRICS.forEach(function(k){
+      var isRatio = k==='cpl'||k==='cpmql';
+      var fmt = isRatio ? fmtRatio : fmtNum;
+      var fc = computeForecast(k);
+      var tile = document.createElement('div');
+      tile.className = 'tile' + (isRatio ? ' derived' : '');
+      var html = '<div class="label">'+METRIC_LABELS[k]+' &middot; '+JMONTHS[forecastMonth-1]+' '+forecastYear+'</div>'+
+        '<div class="value tabular"></div>';
+      html += fc
+        ? '<div class="target-line">Plan '+fmt(fc.futurePlanned)+' &middot; Pace '+Math.round(fc.pace*100)+'%</div>'
+        : '<div class="target-line">No target set</div>';
+      tile.innerHTML = html;
+      els.forecastTiles.appendChild(tile);
+      animateValue(tile.querySelector('.value'), fc ? fc.forecast : 0, fmt);
+    });
+  }
+
   function readJalaliDate(prefix){
     var jy = parseInt(els[prefix+'Y'].value, 10), jm = parseInt(els[prefix+'M'].value, 10), jd = parseInt(els[prefix+'D'].value, 10);
     var g = toGregorian(jy, jm, jd);
@@ -759,7 +853,7 @@
       if (info && info.target > 0){
         var attain = actual / info.target;
         var variance = attain - 1;
-        html += '<div class="target-line">Target '+fmtNum(info.target)+'</div>';
+        html += '<div class="target-line">'+(k==='cost'?'Budget':'Target')+' '+fmtNum(info.target)+'</div>';
         html += '<div class="stat-chips">' + statChip('Attain', attain, LOWER_BETTER[k]);
         if (isOpenPeriod[dateFilter] && info.paceDenom){
           html += statChip('Pace', actual/info.paceDenom, LOWER_BETTER[k]);
@@ -775,56 +869,120 @@
     animateTileEntrance(els.tiles);
   }
 
+  // Buckets a date into a daily/weekly/monthly/yearly key+label. Weekly reuses the same Jalali
+  // week convention used everywhere else in this system (weeks 1-4 = days 1-7/8-14/15-21/22-28,
+  // week 5 = the tail of the month) — weeks never span a month boundary, which keeps target
+  // proration simple (each bucket belongs to exactly one month's target).
+  function bucketDate(iso, granularity){
+    var d = dateFromISO(iso);
+    var j = toJalaali(d.getUTCFullYear(), d.getUTCMonth()+1, d.getUTCDate());
+    if (granularity === 'weekly'){
+      var week = j.jd<=7?1:j.jd<=14?2:j.jd<=21?3:j.jd<=28?4:5;
+      return { type:'weekly', key: j.jy+'-'+j.jm+'-W'+week, label: JMONTHS[j.jm-1]+' W'+week, jy:j.jy, jm:j.jm, week:week };
+    }
+    if (granularity === 'monthly') return { type:'monthly', key: j.jy+'-'+j.jm, label: JMONTHS[j.jm-1]+' '+j.jy, jy:j.jy, jm:j.jm };
+    if (granularity === 'yearly') return { type:'yearly', key: String(j.jy), label: String(j.jy), jy:j.jy };
+    return { type:'daily', key: iso, label: jalaaliLabel(iso), jy:j.jy, jm:j.jm, jd:j.jd };
+  }
+
+  // Per-bucket target: daily/weekly get the month's target prorated to that bucket's day-count
+  // (ratio metrics never prorate — same convention as periodTargetInfo); monthly gets the full
+  // month target as-is; yearly sums (or, for ratios, re-derives from summed cost/denominator)
+  // across all 12 months.
+  function bucketTargetFor(bucket, metricKey, isRatio){
+    if (bucket.type === 'yearly'){
+      if (isRatio){
+        var cs=0, ds=0;
+        for (var m=1;m<=12;m++){ cs+=monthlyTargetFor('cost',bucket.jy,m); ds+=monthlyTargetFor(RATIO_DENOM[metricKey],bucket.jy,m); }
+        return ds ? cs/ds : 0;
+      }
+      var s=0; for (var m2=1;m2<=12;m2++) s+=monthlyTargetFor(metricKey,bucket.jy,m2);
+      return s;
+    }
+    if (bucket.type === 'monthly'){
+      return isRatio ? monthlyRatioTarget(metricKey, bucket.jy, bucket.jm) : monthlyTargetFor(metricKey, bucket.jy, bucket.jm);
+    }
+    if (isRatio) return monthlyRatioTarget(metricKey, bucket.jy, bucket.jm);
+    var dim = daysInJalaliMonth(bucket.jy, bucket.jm);
+    var daysInBucket = bucket.type === 'weekly' ? (bucket.week === 5 ? (dim-28) : 7) : 1;
+    return monthlyTargetFor(metricKey, bucket.jy, bucket.jm) * daysInBucket / dim;
+  }
+
   function renderTrend(rows){
     var range = dateRangeFor(dateFilter);
     if (!range) return;
-    var byDay = {};
+    var isRatioMetric = trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql';
+    var buckets = {}, order = [];
     var cur = range.from;
-    while (cur <= range.to){ byDay[cur] = 0; cur = isoAddDays(cur,1); }
-    var cost = {}, count = {};
+    while (cur <= range.to){
+      var b0 = bucketDate(cur, trendGranularity);
+      if (!buckets[b0.key]){ buckets[b0.key] = { label:b0.label, jy:b0.jy, jm:b0.jm, jd:b0.jd, week:b0.week, type:b0.type, value:0, cost:0, count:0 }; order.push(b0.key); }
+      cur = isoAddDays(cur,1);
+    }
     rows.forEach(function(row){
       var d = field(row,'date');
-      if (!(d in byDay)) return;
-      if (trendMetric === 'cpl' || trendMetric === 'cpo' || trendMetric === 'cpmql'){
-        cost[d] = (cost[d]||0) + metricValue(row,'cost');
+      var b = bucketDate(d, trendGranularity);
+      var bucket = buckets[b.key];
+      if (!bucket) return; // outside the selected range
+      if (isRatioMetric){
+        bucket.cost += metricValue(row,'cost');
         var denom = trendMetric==='cpl' ? 'leads' : (trendMetric==='cpo' ? 'orders' : 'mql');
-        count[d] = (count[d]||0) + metricValue(row,denom);
+        bucket.count += metricValue(row,denom);
       } else if (['impressions','clicks','sessions'].indexOf(trendMetric) !== -1){
-        byDay[d] += field(row,trendMetric)||0;
+        bucket.value += field(row,trendMetric)||0;
       } else {
-        byDay[d] += metricValue(row,trendMetric);
+        bucket.value += metricValue(row,trendMetric);
       }
     });
-    var labels = [], values = [];
-    Object.keys(byDay).sort().forEach(function(d){
-      labels.push(jalaaliLabel(d));
-      if (trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql'){
-        values.push(count[d] ? Math.round((cost[d]||0)/count[d]) : 0);
-      } else {
-        values.push(byDay[d]);
-      }
+    var labels = [], values = [], targetValues = [];
+    var isTargetable = !!TARGETABLE_METRICS[trendMetric];
+    order.forEach(function(key){
+      var b = buckets[key];
+      labels.push(b.label);
+      values.push(isRatioMetric ? (b.count ? Math.round(b.cost/b.count) : 0) : b.value);
+      if (isTargetable) targetValues.push(bucketTargetFor(b, trendMetric, isRatioMetric));
     });
+    // Forecast point: one extra bucket appended after the real ones, at the chosen future month —
+    // Actual/Target stay null there (Chart.js breaks the line on null, so they simply stop), and a
+    // separate "Forecast" dataset holds a single isolated point, always labeled regardless of the
+    // showLabels density cutoff since it's the one point this whole feature exists to show.
+    var forecastValues = null;
+    if (FORECAST_METRICS.indexOf(trendMetric) !== -1){
+      var fc = computeForecast(trendMetric);
+      if (fc){
+        labels.push(JMONTHS[forecastMonth-1]+' '+forecastYear);
+        values.push(null);
+        targetValues.push(null);
+        forecastValues = values.map(function(){ return null; });
+        forecastValues[forecastValues.length-1] = fc.forecast;
+      }
+    }
     var ctx = document.getElementById('trend-chart');
     var textColor = getComputedStyle(document.body).getPropertyValue('--text-dim').trim();
     var labelColor = getComputedStyle(document.body).getPropertyValue('--text').trim();
     var gridColor = getComputedStyle(document.body).getPropertyValue('--border').trim();
     var accent = getComputedStyle(document.body).getPropertyValue('--accent').trim();
     var faint = getComputedStyle(document.body).getPropertyValue('--text-faint').trim();
-    var fmtLabel = (trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql') ? fmtRatio : fmtNum;
-    // Data labels on every point get unreadable past ~20 points (Last 30 days / Quarter to date) —
-    // same threshold the chart already uses to hide individual point markers.
+    var warn = getComputedStyle(document.body).getPropertyValue('--warn').trim();
+    var fmtLabel = isRatioMetric ? fmtRatio : fmtNum;
+    // Data labels on every point get unreadable past ~20 points (Last 30 days / Quarter to date at
+    // daily granularity) — same threshold the chart already uses to hide individual point markers.
     var showLabels = labels.length <= 20;
-    // Target reference line: a rate metric's target is a constant rate (not prorated by day), everything
-    // else gets the period target spread evenly across the visible days as a flat "pace" benchmark.
-    var isRatioMetric = trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql';
-    var info = TARGETABLE_METRICS[trendMetric] ? periodTargetInfo(trendMetric) : null;
-    var targetPerDay = (info && info.target) ? (isRatioMetric ? info.target : info.target/labels.length) : null;
+    // A 1-2 point range (e.g. "Last day with data") renders as a near-invisible dot at the default
+    // radius — size points up so a sparse range is still clearly visible, not just technically present.
+    var pointRadius = labels.length>20 ? 0 : (labels.length<=2 ? 7 : 3);
+    var hasTarget = targetValues.some(function(v){ return v!=null && v>0; });
     var datasets = [{ label:'Actual', data: values, borderColor: accent, backgroundColor: accent+'33',
-      fill: true, tension: .3, pointRadius: labels.length>20?0:3 }];
-    if (targetPerDay){
-      datasets.push({ label:'Target', data: labels.map(function(){ return targetPerDay; }),
-        borderColor: faint, borderDash:[5,4], borderWidth:1.5, pointRadius:0, fill:false, tension:0,
+      fill: true, tension: .3, pointRadius: pointRadius }];
+    if (hasTarget){
+      datasets.push({ label: trendMetric==='cost'?'Budget':'Target', data: targetValues,
+        borderColor: faint, borderDash:[5,4], borderWidth:1.5, pointRadius: labels.length<=2?5:0, fill:false, tension:0,
         datalabels:{ display:false } });
+    }
+    if (forecastValues){
+      datasets.push({ label:'Forecast', data: forecastValues,
+        borderColor: warn, backgroundColor: warn, pointRadius:7, pointStyle:'rectRot', showLine:false,
+        datalabels:{ display:true, color: warn } });
     }
     if (charts.trend) charts.trend.destroy();
     charts.trend = new Chart(ctx, {
@@ -832,12 +990,12 @@
       data: { labels: labels, datasets: datasets },
       options: { responsive:true, maintainAspectRatio:false,
         layout:{ padding:{ top: showLabels ? 20 : 6 } },
-        plugins:{ legend:{ display: !!targetPerDay, position:'top', align:'end',
+        plugins:{ legend:{ display: hasTarget || !!forecastValues, position:'top', align:'end',
             labels:{ color:textColor, boxWidth:14, boxHeight:2, padding:12,
               font:{ family:"'Public Sans', sans-serif", size:10.5 } } },
           datalabels:{ display: showLabels, color: labelColor, anchor:'end', align:'top', offset:6,
             font:{ family: "'IBM Plex Mono', monospace", size: 10, weight: '600' },
-            formatter: function(v){ return fmtLabel(v); } } },
+            formatter: function(v){ return v==null?'':fmtLabel(v); } } },
         scales:{ x:{ ticks:{ color:textColor, maxRotation:0, autoSkip:true }, grid:{ display:false } },
                  y:{ ticks:{ color:textColor }, grid:{ color:gridColor }, beginAtZero:true } } }
     });
@@ -987,7 +1145,7 @@
 
   function renderActiveTab(){
     var rows = filteredRows();
-    if (activeTab === 'overview'){ renderTiles(rows); renderTrend(rows); renderBreakdown(rows); }
+    if (activeTab === 'overview'){ renderTiles(rows); renderTrend(rows); renderBreakdown(rows); renderForecastTiles(); }
     else if (activeTab === 'landing'){ renderLandingPagesTab(rows); }
     else if (activeTab === 'copies'){ renderCopiesTab(rows); }
   }
@@ -1023,7 +1181,7 @@
       if (!anchorISO || d > anchorISO) anchorISO = d;
       if (!minISO || d < minISO) minISO = d;
     });
-    if (anchorISO) populateJalaliPickers();
+    if (anchorISO) { populateJalaliPickers(); populateForecastPicker(); }
 
     TARGETS = payload.targets || { fields: [], rows: [] };
     TARGET_IDX = {};
@@ -1078,6 +1236,9 @@
   });
   els.channelTypeSelect.addEventListener('change', function(){ channelTypeFilter = els.channelTypeSelect.value; renderAll(); });
   els.trendMetricSelect.addEventListener('change', function(){ trendMetric = els.trendMetricSelect.value; renderTrend(filteredRows()); });
+  els.trendGranularitySelect.addEventListener('change', function(){ trendGranularity = els.trendGranularitySelect.value; renderTrend(filteredRows()); });
+  els.forecastYearSelect.addEventListener('change', function(){ forecastYear = parseInt(els.forecastYearSelect.value,10); renderForecastTiles(); renderTrend(filteredRows()); });
+  els.forecastMonthSelect.addEventListener('change', function(){ forecastMonth = parseInt(els.forecastMonthSelect.value,10); renderForecastTiles(); renderTrend(filteredRows()); });
   els.breakdownDimSelect.addEventListener('change', function(){ breakdownDim = els.breakdownDimSelect.value; renderBreakdown(filteredRows()); });
   els.dateFilterSelect.addEventListener('change', function(){ dateFilter = els.dateFilterSelect.value; renderAll(); });
   ['fromY','fromM','fromD'].forEach(function(k){ els[k].addEventListener('change', function(){ onCustomDateChange('from'); }); });
