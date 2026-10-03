@@ -661,34 +661,38 @@
   }
 
   // ---------- Forecast (checkbox on the trend chart) ----------
-  // Only Daily and Weekly charts forecast, and only ONE future bucket: the day (or Jalali week) right
-  // after the chart's last bucket.
-  var FORECAST_GRANULARITIES_ = { daily:1, weekly:1 };
+  // Weekly chart only, and only ONE future bucket: the Jalali week right after the latest data. The
+  // reference for pace is fixed — always the 14 days ending at the latest data day — so the forecast does
+  // NOT move when the date filter changes; it only changes with new data, the channel filter, or metric.
+  var FORECAST_GRANULARITIES_ = { weekly:1 };
+  var FORECAST_REFERENCE_DAYS_ = 14;
 
-  // First/last day and label of the bucket that follows the chart's last one, at the chart's granularity.
+  // First/last day and label of the week that follows the one containing the latest data day.
   function nextBucket(){
-    var range = dateRangeFor(dateFilter);
-    if (!range) return null;
-    var lastKey = bucketDate(range.to, trendGranularity).key;
-    var from = range.to;
-    do { from = isoAddDays(from, 1); } while (bucketDate(from, trendGranularity).key === lastKey);
-    var b = bucketDate(from, trendGranularity), to = from;
-    while (bucketDate(isoAddDays(to, 1), trendGranularity).key === b.key) to = isoAddDays(to, 1);
+    if (!anchorISO) return null;
+    var lastKey = bucketDate(anchorISO, 'weekly').key;
+    var from = anchorISO;
+    do { from = isoAddDays(from, 1); } while (bucketDate(from, 'weekly').key === lastKey);
+    var b = bucketDate(from, 'weekly'), to = from;
+    while (bucketDate(isoAddDays(to, 1), 'weekly').key === b.key) to = isoAddDays(to, 1);
     return { from: from, to: to, label: b.label };
   }
 
-  // The formula: pace = actual / plan over the chart's selected period (same basis as the KPI tiles);
-  // forecast = the next bucket's own plan x that pace. Returns a reason instead of a made-up number when
-  // either side has no plan entered.
+  // The formula: pace = actual / plan over the past two weeks (14 days ending at the latest data, honoring
+  // the channel filter but NOT the date filter); forecast = next week's own plan x that pace. Returns a
+  // reason instead of a made-up number when a plan is missing.
   function computeForecast(metricKey){
+    var range = dateRangeFor(dateFilter);
+    if (!range || range.to !== anchorISO) return { ok:false, reason:'Forecast needs a range that ends at the latest data' };
     var nb = nextBucket();
-    if (!nb) return { ok:false, reason:'No plan for the selected period' };
-    var histInfo = periodTargetInfo(metricKey);
-    // Open windows (MTD/QTD) carry the full period target plus a paceDenom prorated to the days elapsed so
-    // far — pace has to be measured against THAT, not against a full month nobody has finished yet.
-    var histPlanned = histInfo ? (histInfo.paceDenom || histInfo.target) : 0;
-    if (!histPlanned) return { ok:false, reason:'No plan for the selected period' };
-    var pace = computeTotals(filteredRows())[metricKey] / histPlanned;
+    var refFrom = isoAddDays(anchorISO, -(FORECAST_REFERENCE_DAYS_ - 1));
+    var refPlanned = targetForDateRange(metricKey, refFrom, anchorISO);
+    if (!refPlanned) return { ok:false, reason:'No plan for the past two weeks' };
+    var refRows = RAW.rows.filter(function(row){
+      var d = field(row,'date');
+      return d >= refFrom && d <= anchorISO && inChannelFilter(field(row,'channelType'));
+    });
+    var pace = computeTotals(refRows)[metricKey] / refPlanned;
     var planned = targetForDateRange(metricKey, nb.from, nb.to);
     if (!planned) return { ok:false, reason:'No plan for ' + nb.label };
     return { ok:true, bucket: nb, pace: pace, planned: planned, forecast: planned * pace };
@@ -946,16 +950,15 @@
       values.push(isRatioMetric ? (b.count ? Math.round(b.cost/b.count) : 0) : b.value);
       if (isTargetable) targetValues.push(bucketTargetFor(b, trendMetric, isRatioMetric));
     });
-    // Forecast (checkbox, top right of the chart): ONE extra bucket after the real ones — next day on a
-    // Daily chart, next week on a Weekly one. Actual/Target stay null there (Chart.js breaks the line on
+    // Forecast (checkbox, top right of the chart): ONE extra bucket after the real ones — the next week. Actual/Target stay null there (Chart.js breaks the line on
     // null) and a separate "Forecast" dataset holds the single point. The checkbox is only available for
-    // the forecastable metrics and Daily/Weekly; when it's on but there's nothing to forecast from (no
+    // the forecastable metrics on the Weekly chart; when it's on but there's nothing to forecast from (no
     // plan entered), the reason is shown next to it instead of silently drawing nothing.
     var forecastValues = null;
     var canForecast = FORECAST_METRICS.indexOf(trendMetric) !== -1 && !!FORECAST_GRANULARITIES_[trendGranularity];
     els.forecastToggle.disabled = !canForecast;
     els.forecastToggleLabel.classList.toggle('disabled', !canForecast);
-    els.forecastToggleLabel.title = canForecast ? '' : 'Forecast is available for Leads, CPL, MQL and CPMQL on Daily or Weekly charts';
+    els.forecastToggleLabel.title = canForecast ? '' : 'Forecast is available on the Weekly chart for Leads, CPL, MQL and CPMQL';
     els.forecastHint.textContent = '';
     if (forecastOn && canForecast){
       var fc = computeForecast(trendMetric);
@@ -965,6 +968,7 @@
         targetValues.push(null);
         forecastValues = labels.map(function(){ return null; });
         forecastValues[forecastValues.length-1] = fc.forecast;
+        els.forecastHint.textContent = 'Pace over the past 2 weeks: ' + Math.round(fc.pace*100) + '%';
       } else {
         els.forecastHint.textContent = fc.reason;
       }
