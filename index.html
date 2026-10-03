@@ -978,6 +978,25 @@
     return monthlyTargetFor(metricKey, bucket.jy, bucket.jm) * daysInBucket / dim;
   }
 
+  // Splits the forecast range into buckets of the chart's current granularity. Each bucket's plan is
+  // the target for just the part of the range that falls inside it (targetForDateRange prorates by
+  // days, so partial edge buckets are scaled correctly and the buckets add up to the Forecast card's
+  // plan; rate metrics like CPL/CPMQL stay a rate per bucket).
+  function forecastBucketsFor(metricKey){
+    var from = forecastFrom, to = forecastTo;
+    if (from > to){ var tmp = from; from = to; to = tmp; }
+    var by = {}, order = [], cur = from;
+    while (cur <= to){
+      var b = bucketDate(cur, trendGranularity);
+      if (!by[b.key]){ by[b.key] = { label:b.label, from:cur, to:cur }; order.push(b.key); }
+      by[b.key].to = cur;
+      cur = isoAddDays(cur, 1);
+    }
+    return order.map(function(k){
+      return { label: by[k].label, planned: targetForDateRange(metricKey, by[k].from, by[k].to) };
+    });
+  }
+
   function renderTrend(rows){
     var range = dateRangeFor(dateFilter);
     if (!range) return;
@@ -1012,19 +1031,21 @@
       values.push(isRatioMetric ? (b.count ? Math.round(b.cost/b.count) : 0) : b.value);
       if (isTargetable) targetValues.push(bucketTargetFor(b, trendMetric, isRatioMetric));
     });
-    // Forecast point: one extra bucket appended after the real ones, at the chosen future month —
-    // Actual/Target stay null there (Chart.js breaks the line on null, so they simply stop), and a
-    // separate "Forecast" dataset holds a single isolated point, always labeled regardless of the
-    // showLabels density cutoff since it's the one point this whole feature exists to show.
+    // Forecast: the future range is cut into the SAME buckets as the chart (days / weeks / months /
+    // years, per the Daily/Weekly/Monthly/Yearly selector) and appended after the real ones. Each
+    // bucket = that bucket's own plan x the pace ratio. Actual/Target stay null there (Chart.js breaks
+    // the line on null), and a separate "Forecast" dataset carries the future points.
     var forecastValues = null;
     if (FORECAST_METRICS.indexOf(trendMetric) !== -1){
       var fc = computeForecast(trendMetric);
       if (fc.ok){
-        labels.push(jalaaliLabel(forecastFrom)+'→'+jalaaliLabel(forecastTo));
-        values.push(null);
-        targetValues.push(null);
-        forecastValues = values.map(function(){ return null; });
-        forecastValues[forecastValues.length-1] = fc.forecast;
+        forecastValues = labels.map(function(){ return null; });
+        forecastBucketsFor(trendMetric).forEach(function(fb){
+          labels.push(fb.label);
+          values.push(null);
+          targetValues.push(null);
+          forecastValues.push(fb.planned * fc.pace);
+        });
       }
     }
     var ctx = document.getElementById('trend-chart');
@@ -1049,9 +1070,11 @@
         datalabels:{ display:false } });
     }
     if (forecastValues){
+      var fcCount = forecastValues.filter(function(v){ return v != null; }).length;
       datasets.push({ label:'Forecast', data: forecastValues,
-        borderColor: warn, backgroundColor: warn, pointRadius:7, pointStyle:'rectRot', showLine:false,
-        datalabels:{ display:true, color: warn } });
+        borderColor: warn, backgroundColor: warn, borderDash:[6,4], borderWidth:1.5, tension:0, fill:false,
+        pointRadius: fcCount > 40 ? 0 : (fcCount > 1 ? 3.5 : 7), pointStyle:'rectRot',
+        datalabels:{ display:'auto', color: warn } });
     }
     if (charts.trend) charts.trend.destroy();
     charts.trend = new Chart(ctx, {
