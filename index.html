@@ -478,13 +478,25 @@
   // ---------- Target lookup (Targets tab: one row per Jalali Year+Month) ----------
   function tfield(row, name){ return row[TARGET_IDX[name]] || 0; }
 
-  // Per-Channel-Type targets exist only for Lead and Cost (Settings!E "Target Lead <Channel>" / "Target
-  // Cost <Channel>" columns) — when a specific Channel Type filter is active, prefer that channel's own
-  // target over the blended one; other metrics/channels fall back to the blended target unchanged.
+  // Cardio has two lead target groups: "Performance" and "Awareness". Awareness = Blog + Direct + SEO,
+  // and blank Channel Type too (no UTM — those already land in Direct in this BI). It's a synthetic
+  // filter value rather than a real Channel Type, so the same group drives both which rows are shown
+  // and which target column is read.
+  var AWARENESS_FILTER = '__awareness';
+  var AWARENESS_MEMBERS_ = { 'Blog':1, 'Direct':1, '':1 };
+  function inChannelFilter(channelType){
+    if (!channelTypeFilter) return true;
+    var ct = (channelType || '').toString().trim();
+    if (channelTypeFilter === AWARENESS_FILTER) return !!AWARENESS_MEMBERS_[ct];
+    return ct === channelTypeFilter.trim();
+  }
+
+  // Per-group targets exist only for Lead and Cost ("Target Lead <Group>" / "Budget <Group>" columns).
+  // With a channel filter active, only a group that actually has a target column gets one — any other
+  // channel (e.g. Referral, or Blog on its own) shows "No target set" rather than borrowing the blended
+  // total, which would be compared against a single channel's actuals.
   var CHANNEL_TARGET_METRICS_ = { leads: 'lead', cost: 'cost' };
-  // "Organic" was merged into "Direct" for Cardio (2026-09-29) — no separate Organic target column,
-  // and it's no longer a selectable Channel Type at all (removed from the Settings dropdown).
-  var CHANNEL_TARGET_SUFFIX_ = { 'Performance':'Performance', 'Blog':'Blog', 'Retention':'Retention', 'eCRM':'Ecrm' };
+  var CHANNEL_TARGET_SUFFIX_ = { 'Performance':'Performance', '__awareness':'Awareness', 'Retention':'Retention', 'eCRM':'Ecrm' };
 
   function monthlyTargetFor(metricKey, jy, jmIdx){
     var row = TARGETS_BY_KEY[jy + '|' + JMONTHS_FULL[jmIdx-1]];
@@ -492,7 +504,7 @@
     var chPrefix = CHANNEL_TARGET_METRICS_[metricKey];
     if (channelTypeFilter && chPrefix){
       var suffix = CHANNEL_TARGET_SUFFIX_[channelTypeFilter.trim()];
-      if (suffix) return tfield(row, chPrefix + suffix);
+      return suffix ? tfield(row, chPrefix + suffix) : 0;
     }
     return tfield(row, metricKey);
   }
@@ -767,7 +779,7 @@
     return RAW.rows.filter(function(row){
       var d = field(row,'date');
       if (d < range.from || d > range.to) return false;
-      if (channelTypeFilter && field(row,'channelType') !== channelTypeFilter) return false;
+      if (!inChannelFilter(field(row,'channelType'))) return false;
       return true;
     });
   }
@@ -855,7 +867,8 @@
       RAW.rows.forEach(function(row){ var v = field(row,'channelType'); if (v) types[v] = true; });
       return Object.keys(types).sort();
     })();
-    els.channelTypeSelect.innerHTML = '<option value="">Channel Type: All</option>';
+    els.channelTypeSelect.innerHTML = '<option value="">Channel Type: All</option>' +
+      '<option value="'+AWARENESS_FILTER+'">Awareness (Blog + Direct + SEO)</option>';
     list.forEach(function(t){
       var o = document.createElement('option'); o.value = t; o.textContent = t;
       els.channelTypeSelect.appendChild(o);
