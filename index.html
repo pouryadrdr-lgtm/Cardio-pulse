@@ -271,9 +271,11 @@
               <th class="sortable" data-sort="name">Group</th>
               <th class="num sortable" data-sort="leads">Leads</th>
               <th class="num sortable" data-sort="mql">MQL</th>
+              <th class="num sortable" data-sort="visit">Visit</th>
               <th class="num sortable" data-sort="orders">Orders</th>
               <th class="num sortable" data-sort="cost">Cost</th>
               <th class="num sortable" data-sort="cpl">CPL</th>
+              <th class="num sortable" data-sort="cpv">Cost/Visit</th>
               <th class="num sortable" data-sort="cpo">CPO</th>
             </tr></thead>
             <tbody></tbody>
@@ -420,16 +422,16 @@
   var trendGranularity = 'daily'; // daily | weekly | monthly | yearly
   var breakdownDim = 'channelType';
   var breakdownSort = { key: 'cpl', dir: 'asc' }; // default matches the table's old fixed "best CPL first" order
-  var BREAKDOWN_SORT_DEFAULT_DIR_ = { name:'asc', leads:'desc', mql:'desc', orders:'desc', cost:'desc', cpl:'asc', cpo:'asc' };
+  var BREAKDOWN_SORT_DEFAULT_DIR_ = { name:'asc', leads:'desc', mql:'desc', visit:'desc', orders:'desc', cost:'desc', cpl:'asc', cpv:'asc', cpo:'asc' };
   var activeTab = 'overview';
   var charts = { trend: null, breakdown: null, lp: null, cp: null };
-  var FORECAST_METRICS = ['leads','cpl','mql','cpmql']; // the metrics this feature covers
+  var FORECAST_METRICS = ['leads','cpl','mql','cpmql','visit','cpv']; // the metrics this feature covers
   var forecastOn = false; // the "Forecast" checkbox on the trend chart
 
-  var TYPED_METRICS = ['leads','mql','orders','cost'];
+  var TYPED_METRICS = ['leads','mql','orders','cost','visit'];
   var METRIC_LABELS = { cost:'Cost (IRR)', impressions:'Impressions', clicks:'Clicks', sessions:'Sessions',
-    leads:'Leads', mql:'MQL', orders:'Orders', sms:'SMS Sent',
-    cpl:'CPL', cpo:'CPO', cpmql:'CPMQL' };
+    leads:'Leads', mql:'MQL', orders:'Orders', sms:'SMS Sent', visit:'Visit',
+    cpl:'CPL', cpo:'CPO', cpmql:'CPMQL', cpv:'Cost / Visit' };
 
   var els = {};
   ['status-dot','status-text','settings-panel','endpoint-input','empty-state','error-state','error-detail',
@@ -481,9 +483,32 @@
   var CHANNEL_TARGET_METRICS_ = { leads: 'lead', cost: 'cost' };
   var CHANNEL_TARGET_SUFFIX_ = { 'Performance':'Performance', '__awareness':'Awareness', 'Retention':'Retention', 'eCRM':'Ecrm' };
 
+  // Visits have no plan column of their own: the plan is the group's Lead plan x its Lead->Visit conversion
+  // plan ("Target CR Lead-Visit <Group>"; a value above 1 is read as a percentage, so 15 and 0.15 both mean 15%).
+  // With a group filter that group's plan is used; in the All view the groups' visit plans are added up, but
+  // only once EVERY group that has a lead plan also has a conversion plan — otherwise a partial sum would be
+  // compared against all visits. No conversion plan entered = no visit target (and so no cost-per-visit target).
+  var VISIT_GROUPS_ = ['Performance','Awareness','Retention','Ecrm'];
+  function crValue_(row, group){ var v = tfield(row, 'crVisit' + group); return v > 1 ? v/100 : v; }
+  function monthlyVisitTarget(row){
+    var suffix = channelTypeFilter ? CHANNEL_TARGET_SUFFIX_[channelTypeFilter.trim()] : null;
+    if (channelTypeFilter) {
+      if (!suffix) return 0;
+      var g = suffix; return tfield(row, 'lead' + g) * crValue_(row, g);
+    }
+    var sum = 0;
+    for (var i = 0; i < VISIT_GROUPS_.length; i++){
+      var grp = VISIT_GROUPS_[i], lead = tfield(row, 'lead' + grp), cr = crValue_(row, grp);
+      if (lead > 0 && !(cr > 0)) return 0;
+      sum += lead * cr;
+    }
+    return sum;
+  }
+
   function monthlyTargetFor(metricKey, jy, jmIdx){
     var row = TARGETS_BY_KEY[jy + '|' + JMONTHS_FULL[jmIdx-1]];
     if (!row) return 0;
+    if (metricKey === 'visit') return monthlyVisitTarget(row);
     var chPrefix = CHANNEL_TARGET_METRICS_[metricKey];
     if (channelTypeFilter && chPrefix){
       var suffix = CHANNEL_TARGET_SUFFIX_[channelTypeFilter.trim()];
@@ -492,7 +517,7 @@
     return tfield(row, metricKey);
   }
 
-  var RATIO_DENOM = { cpl:'leads', cpmql:'mql', cpo:'orders' };
+  var RATIO_DENOM = { cpl:'leads', cpmql:'mql', cpo:'orders', cpv:'visit' };
 
   function monthlyRatioTarget(metricKey, jy, jmIdx){
     var denomKey = RATIO_DENOM[metricKey];
@@ -539,7 +564,7 @@
     return { target: targetForDateRange(metricKey, range.from, range.to) };
   }
 
-  var LOWER_BETTER = { cost:1, cpl:1, cpmql:1, cpo:1 };
+  var LOWER_BETTER = { cost:1, cpl:1, cpmql:1, cpo:1, cpv:1 };
 
   function statChip(label, ratio, lowerBetter){
     if (ratio === null || !isFinite(ratio)) return '<span class="stat-chip neutral">'+label+' —</span>';
@@ -769,7 +794,7 @@
     els.channelTypeSelect.value = current;
 
     if (!els.trendMetricSelect.options.length){
-      ['leads','mql','orders','cost','sessions','impressions','clicks','cpl','cpo','cpmql'].forEach(function(m){
+      ['leads','mql','visit','orders','cost','sessions','impressions','clicks','cpl','cpo','cpmql','cpv'].forEach(function(m){
         var o = document.createElement('option'); o.value = m; o.textContent = METRIC_LABELS[m];
         els.trendMetricSelect.appendChild(o);
       });
@@ -793,19 +818,20 @@
     t.cpl = t.leads ? t.cost/t.leads : 0;
     t.cpo = t.orders ? t.cost/t.orders : 0;
     t.cpmql = t.mql ? t.cost/t.mql : 0;
+    t.cpv = t.visit ? t.cost/t.visit : 0;
     return t;
   }
 
-  var TARGETABLE_METRICS = { cost:1, impressions:1, clicks:1, sessions:1, leads:1, mql:1, orders:1, sms:1, cpl:1, cpo:1, cpmql:1 };
+  var TARGETABLE_METRICS = { cost:1, impressions:1, clicks:1, sessions:1, leads:1, mql:1, orders:1, sms:1, visit:1, cpl:1, cpo:1, cpmql:1, cpv:1 };
 
   function renderTiles(rows){
     var t = computeTotals(rows);
-    var order = ['cost','impressions','clicks','sessions','leads','mql','orders','sms','cpl','cpo','cpmql'];
+    var order = ['cost','impressions','clicks','sessions','leads','mql','visit','orders','sms','cpl','cpmql','cpv','cpo'];
     els.tiles.innerHTML = '';
     order.forEach(function(k){
       var actual = t[k];
       if (!actual) return; // hide tiles with no data for the current filter — keeps the grid focused
-      var isDerived = (k==='cpl'||k==='cpo'||k==='cpmql');
+      var isDerived = (k==='cpl'||k==='cpo'||k==='cpmql'||k==='cpv');
       var tile = document.createElement('div');
       tile.className = 'tile' + (isDerived ? ' derived' : '');
       var html = '<div class="label">'+METRIC_LABELS[k]+'</div>'+
@@ -870,7 +896,7 @@
   function renderTrend(rows){
     var range = dateRangeFor(dateFilter);
     if (!range) return;
-    var isRatioMetric = trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql';
+    var isRatioMetric = trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql'||trendMetric==='cpv';
     var buckets = {}, order = [];
     var cur = range.from;
     while (cur <= range.to){
@@ -885,7 +911,7 @@
       if (!bucket) return; // outside the selected range
       if (isRatioMetric){
         bucket.cost += metricValue(row,'cost');
-        var denom = trendMetric==='cpl' ? 'leads' : (trendMetric==='cpo' ? 'orders' : 'mql');
+        var denom = trendMetric==='cpl' ? 'leads' : (trendMetric==='cpo' ? 'orders' : (trendMetric==='cpv' ? 'visit' : 'mql'));
         bucket.count += metricValue(row,denom);
       } else if (['impressions','clicks','sessions'].indexOf(trendMetric) !== -1){
         bucket.value += field(row,trendMetric)||0;
@@ -985,12 +1011,13 @@
     rows.forEach(function(row){
       var key = keyFn(row);
       if (key === null) return;
-      if (!groups[key]) groups[key] = { sessions:0, leads:0, mql:0, orders:0, cost:0 };
+      if (!groups[key]) groups[key] = { sessions:0, leads:0, mql:0, orders:0, cost:0, visit:0 };
       var g = groups[key];
       if (opts.sessions) g.sessions += field(row,'sessions')||0;
       g.leads += metricValue(row,'leads');
       g.mql += metricValue(row,'mql');
       g.orders += metricValue(row,'orders');
+      g.visit += metricValue(row,'visit');
       g.cost += metricValue(row,'cost');
     });
     var list = Object.keys(groups).map(function(k){
@@ -998,6 +1025,7 @@
       g.name = k;
       g.cpl = g.leads ? g.cost/g.leads : 0;
       g.cpo = g.orders ? g.cost/g.orders : 0;
+      g.cpv = g.visit ? g.cost/g.visit : 0;
       g.sessLead = g.sessions ? g.leads/g.sessions : 0;
       g.mqlOrder = g.mql ? g.orders/g.mql : 0;
       return g;
@@ -1066,8 +1094,8 @@
       if (!g.leads) tr.className = 'zero';
       tr.innerHTML = '<td class="rank">'+(i+1)+'</td><td>'+escapeHtml(g.name)+'</td>'+
         '<td class="num">'+fmtNum(g.leads)+'</td><td class="num">'+fmtNum(g.mql)+'</td>'+
-        '<td class="num">'+fmtNum(g.orders)+'</td><td class="num">'+fmtNum(g.cost)+'</td>'+
-        '<td class="num">'+fmtRatio(g.cpl)+'</td><td class="num">'+fmtRatio(g.cpo)+'</td>';
+        '<td class="num">'+fmtNum(g.visit)+'</td><td class="num">'+fmtNum(g.orders)+'</td><td class="num">'+fmtNum(g.cost)+'</td>'+
+        '<td class="num">'+fmtRatio(g.cpl)+'</td><td class="num">'+fmtRatio(g.cpv)+'</td><td class="num">'+fmtRatio(g.cpo)+'</td>';
       tbody.appendChild(tr);
     });
     updateBreakdownHeaderIndicators();
