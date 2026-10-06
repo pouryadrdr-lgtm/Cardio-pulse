@@ -468,11 +468,15 @@
   // filter value rather than a real Channel Type, so the same group drives both which rows are shown
   // and which target column is read.
   var AWARENESS_FILTER = '__awareness';
+  // "All except Retention": every channel type but Retention (blank channel types stay in, as in All). Another
+  // synthetic filter value; its plan is the blended plan minus the Retention plan.
+  var NO_RETENTION_FILTER = '__noRetention';
   var AWARENESS_MEMBERS_ = { 'Blog':1, 'Direct':1, '':1 };
   function inChannelFilter(channelType){
     if (!channelTypeFilter) return true;
     var ct = (channelType || '').toString().trim();
     if (channelTypeFilter === AWARENESS_FILTER) return !!AWARENESS_MEMBERS_[ct];
+    if (channelTypeFilter === NO_RETENTION_FILTER) return ct !== 'Retention';
     return ct === channelTypeFilter.trim();
   }
 
@@ -491,13 +495,15 @@
   var VISIT_GROUPS_ = ['Performance','Awareness','Retention','Ecrm'];
   function crValue_(row, group){ var v = tfield(row, 'crVisit' + group); return v > 1 ? v/100 : v; }
   function monthlyVisitTarget(row){
+    var noRet = channelTypeFilter === NO_RETENTION_FILTER;
     var suffix = channelTypeFilter ? CHANNEL_TARGET_SUFFIX_[channelTypeFilter.trim()] : null;
-    if (channelTypeFilter) {
+    if (channelTypeFilter && !noRet) {
       if (!suffix) return 0;
       var g = suffix; return tfield(row, 'lead' + g) * crValue_(row, g);
     }
     var sum = 0;
     for (var i = 0; i < VISIT_GROUPS_.length; i++){
+      if (noRet && VISIT_GROUPS_[i] === 'Retention') continue;
       var grp = VISIT_GROUPS_[i], lead = tfield(row, 'lead' + grp), cr = crValue_(row, grp);
       if (lead > 0 && !(cr > 0)) return 0;
       sum += lead * cr;
@@ -510,6 +516,7 @@
     if (!row) return 0;
     if (metricKey === 'visit') return monthlyVisitTarget(row);
     var chPrefix = CHANNEL_TARGET_METRICS_[metricKey];
+    if (channelTypeFilter === NO_RETENTION_FILTER && chPrefix) return Math.max(0, tfield(row, metricKey) - tfield(row, chPrefix + 'Retention'));
     if (channelTypeFilter && chPrefix){
       var suffix = CHANNEL_TARGET_SUFFIX_[channelTypeFilter.trim()];
       return suffix ? tfield(row, chPrefix + suffix) : 0;
@@ -786,7 +793,8 @@
       return Object.keys(types).sort();
     })();
     els.channelTypeSelect.innerHTML = '<option value="">Channel Type: All</option>' +
-      '<option value="'+AWARENESS_FILTER+'">Awareness (Blog + Direct + SEO)</option>';
+      '<option value="'+AWARENESS_FILTER+'">Awareness (Blog + Direct + SEO)</option>' +
+      '<option value="'+NO_RETENTION_FILTER+'">All except Retention</option>';
     list.forEach(function(t){
       var o = document.createElement('option'); o.value = t; o.textContent = t;
       els.channelTypeSelect.appendChild(o);
