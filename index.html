@@ -272,6 +272,7 @@
               <th class="num sortable" data-sort="leads">Leads</th>
               <th class="num sortable" data-sort="mql">MQL</th>
               <th class="num sortable" data-sort="visit">Visit</th>
+              <th class="num sortable" data-sort="crMqlVisit">MQL&rarr;Visit</th>
               <th class="num sortable" data-sort="orders">Orders</th>
               <th class="num sortable" data-sort="cost">Cost</th>
               <th class="num sortable" data-sort="cpl">CPL</th>
@@ -422,7 +423,7 @@
   var trendGranularity = 'daily'; // daily | weekly | monthly | yearly
   var breakdownDim = 'channelType';
   var breakdownSort = { key: 'cpl', dir: 'asc' }; // default matches the table's old fixed "best CPL first" order
-  var BREAKDOWN_SORT_DEFAULT_DIR_ = { name:'asc', leads:'desc', mql:'desc', visit:'desc', orders:'desc', cost:'desc', cpl:'asc', cpv:'asc', cpo:'asc' };
+  var BREAKDOWN_SORT_DEFAULT_DIR_ = { name:'asc', leads:'desc', mql:'desc', visit:'desc', crMqlVisit:'desc', orders:'desc', cost:'desc', cpl:'asc', cpv:'asc', cpo:'asc' };
   var activeTab = 'overview';
   var charts = { trend: null, breakdown: null, lp: null, cp: null };
   var FORECAST_METRICS = ['leads','cpl','mql','cpmql','visit','cpv']; // the metrics this feature covers
@@ -431,7 +432,7 @@
   var TYPED_METRICS = ['leads','mql','orders','cost','visit'];
   var METRIC_LABELS = { cost:'Cost (IRR)', impressions:'Impressions', clicks:'Clicks', sessions:'Sessions',
     leads:'Leads', mql:'MQL', orders:'Orders', sms:'SMS Sent', visit:'Visit',
-    cpl:'CPL', cpo:'CPO', cpmql:'CPMQL', cpv:'CPV' };
+    cpl:'CPL', cpo:'CPO', cpmql:'CPMQL', cpv:'CPV', crMqlVisit:'MQL → Visit %' };
 
   var els = {};
   ['status-dot','status-text','settings-panel','endpoint-input','empty-state','error-state','error-detail',
@@ -802,7 +803,7 @@
     els.channelTypeSelect.value = current;
 
     if (!els.trendMetricSelect.options.length){
-      ['leads','mql','visit','orders','cost','sessions','impressions','clicks','cpl','cpo','cpmql','cpv'].forEach(function(m){
+      ['leads','mql','visit','crMqlVisit','orders','cost','sessions','impressions','clicks','cpl','cpo','cpmql','cpv'].forEach(function(m){
         var o = document.createElement('option'); o.value = m; o.textContent = METRIC_LABELS[m];
         els.trendMetricSelect.appendChild(o);
       });
@@ -811,6 +812,8 @@
   }
 
   function fmtNum(n){ return Math.round(n).toLocaleString('en-US'); }
+  // Conversion rate shown as a percentage with one decimal (MQL -> Visit, stored as 0-100).
+  function fmtCR(n){ return isFinite(n) && n > 0 ? n.toFixed(1) + '%' : '—'; }
   function fmtRatio(n){ return isFinite(n) && n > 0 ? fmtNum(n) : '—'; }
 
   function computeTotals(rows){
@@ -827,6 +830,7 @@
     t.cpo = t.orders ? t.cost/t.orders : 0;
     t.cpmql = t.mql ? t.cost/t.mql : 0;
     t.cpv = t.visit ? t.cost/t.visit : 0;
+    t.crMqlVisit = t.mql ? t.visit/t.mql*100 : 0;
     return t;
   }
 
@@ -834,12 +838,12 @@
 
   function renderTiles(rows){
     var t = computeTotals(rows);
-    var order = ['cost','impressions','clicks','sessions','leads','mql','visit','orders','sms','cpl','cpmql','cpv','cpo'];
+    var order = ['cost','impressions','clicks','sessions','leads','mql','visit','crMqlVisit','orders','sms','cpl','cpmql','cpv','cpo'];
     els.tiles.innerHTML = '';
     order.forEach(function(k){
       var actual = t[k];
       if (!actual) return; // hide tiles with no data for the current filter — keeps the grid focused
-      var isDerived = (k==='cpl'||k==='cpo'||k==='cpmql'||k==='cpv');
+      var isDerived = (k==='cpl'||k==='cpo'||k==='cpmql'||k==='cpv'||k==='crMqlVisit');
       var tile = document.createElement('div');
       tile.className = 'tile' + (isDerived ? ' derived' : '');
       var html = '<div class="label">'+METRIC_LABELS[k]+'</div>'+
@@ -857,7 +861,7 @@
       }
       tile.innerHTML = html;
       els.tiles.appendChild(tile);
-      animateValue(tile.querySelector('.value'), actual, isDerived ? fmtRatio : fmtNum);
+      animateValue(tile.querySelector('.value'), actual, k==='crMqlVisit' ? fmtCR : (isDerived ? fmtRatio : fmtNum));
     });
     animateTileEntrance(els.tiles);
   }
@@ -905,11 +909,12 @@
     var range = dateRangeFor(dateFilter);
     if (!range) return;
     var isRatioMetric = trendMetric==='cpl'||trendMetric==='cpo'||trendMetric==='cpmql'||trendMetric==='cpv';
+    var isPctMetric = trendMetric==='crMqlVisit'; // visits / MQL, per bucket
     var buckets = {}, order = [];
     var cur = range.from;
     while (cur <= range.to){
       var b0 = bucketDate(cur, trendGranularity);
-      if (!buckets[b0.key]){ buckets[b0.key] = { label:b0.label, jy:b0.jy, jm:b0.jm, jd:b0.jd, week:b0.week, type:b0.type, value:0, cost:0, count:0 }; order.push(b0.key); }
+      if (!buckets[b0.key]){ buckets[b0.key] = { label:b0.label, jy:b0.jy, jm:b0.jm, jd:b0.jd, week:b0.week, type:b0.type, value:0, cost:0, count:0, num:0 }; order.push(b0.key); }
       cur = isoAddDays(cur,1);
     }
     rows.forEach(function(row){
@@ -921,6 +926,9 @@
         bucket.cost += metricValue(row,'cost');
         var denom = trendMetric==='cpl' ? 'leads' : (trendMetric==='cpo' ? 'orders' : (trendMetric==='cpv' ? 'visit' : 'mql'));
         bucket.count += metricValue(row,denom);
+      } else if (isPctMetric){
+        bucket.num += metricValue(row,'visit');
+        bucket.count += metricValue(row,'mql');
       } else if (['impressions','clicks','sessions'].indexOf(trendMetric) !== -1){
         bucket.value += field(row,trendMetric)||0;
       } else {
@@ -932,7 +940,7 @@
     order.forEach(function(key){
       var b = buckets[key];
       labels.push(b.label);
-      values.push(isRatioMetric ? (b.count ? Math.round(b.cost/b.count) : 0) : b.value);
+      values.push(isPctMetric ? (b.count ? Math.round(b.num/b.count*1000)/10 : 0) : (isRatioMetric ? (b.count ? Math.round(b.cost/b.count) : 0) : b.value));
       if (isTargetable) targetValues.push(bucketTargetFor(b, trendMetric, isRatioMetric));
     });
     // Forecast (checkbox, top right of the chart): ONE extra bucket after the real ones — the next week. Actual/Target stay null there (Chart.js breaks the line on
@@ -965,7 +973,7 @@
     var accent = getComputedStyle(document.body).getPropertyValue('--accent').trim();
     var faint = getComputedStyle(document.body).getPropertyValue('--text-faint').trim();
     var warn = getComputedStyle(document.body).getPropertyValue('--warn').trim();
-    var fmtLabel = isRatioMetric ? fmtRatio : fmtNum;
+    var fmtLabel = isPctMetric ? fmtCR : (isRatioMetric ? fmtRatio : fmtNum);
     // A 1-2 point range (e.g. "Last day with data") renders as a near-invisible dot at the default
     // radius — size points up so a sparse range is still clearly visible, not just technically present.
     // Markers fade out only past a genuinely dense range (60+ points, e.g. daily-granularity QTD).
@@ -1034,6 +1042,7 @@
       g.cpl = g.leads ? g.cost/g.leads : 0;
       g.cpo = g.orders ? g.cost/g.orders : 0;
       g.cpv = g.visit ? g.cost/g.visit : 0;
+      g.crMqlVisit = g.mql ? g.visit/g.mql*100 : 0;
       g.sessLead = g.sessions ? g.leads/g.sessions : 0;
       g.mqlOrder = g.mql ? g.orders/g.mql : 0;
       return g;
@@ -1102,7 +1111,7 @@
       if (!g.leads) tr.className = 'zero';
       tr.innerHTML = '<td class="rank">'+(i+1)+'</td><td>'+escapeHtml(g.name)+'</td>'+
         '<td class="num">'+fmtNum(g.leads)+'</td><td class="num">'+fmtNum(g.mql)+'</td>'+
-        '<td class="num">'+fmtNum(g.visit)+'</td><td class="num">'+fmtNum(g.orders)+'</td><td class="num">'+fmtNum(g.cost)+'</td>'+
+        '<td class="num">'+fmtNum(g.visit)+'</td><td class="num">'+fmtCR(g.crMqlVisit)+'</td><td class="num">'+fmtNum(g.orders)+'</td><td class="num">'+fmtNum(g.cost)+'</td>'+
         '<td class="num">'+fmtRatio(g.cpl)+'</td><td class="num">'+fmtRatio(g.cpv)+'</td><td class="num">'+fmtRatio(g.cpo)+'</td>';
       tbody.appendChild(tr);
     });
